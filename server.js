@@ -1,38 +1,41 @@
-require('dotenv').config(); // Load env vars
+require('dotenv').config();
 
 console.log('DB_USER:', process.env.DB_USER);
 console.log('DB_PASSWORD:', process.env.DB_PASSWORD ? '[SET]' : '[NOT SET]');
 
 const express = require('express');
-const cors = require('cors'); // ✅ Import CORS
+const cors = require('cors');
 const mysql = require('mysql2');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer'); // Added for email
-
-// --- Import Google OAuth packages ---
+const nodemailer = require('nodemailer');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const session = require('express-session');
 
+// ✨ NEW: Twilio imports
+const twilio = require('twilio');
+const AccessToken = twilio.jwt.AccessToken;
+const VideoGrant = AccessToken.VideoGrant;
+const ChatGrant = AccessToken.ChatGrant;
+
 const app = express();
 
-// ✅ Enable CORS
+// CORS Configuration
 app.use(cors({
-  origin: 'http://localhost:3000', // Change this to your frontend URL/port if needed (e.g., http://localhost:5173 for Vite)
+  origin: 'http://localhost:3000', // Update for your frontend port
   credentials: true
 }));
 
-app.use(express.json()); // Parse JSON in request body
+app.use(express.json());
 
-// --- Setup express-session (needed for Passport) ---
+// Session Configuration
 app.use(session({
   secret: process.env.SESSION_SECRET || 'some-strong-secret',
   resave: false,
   saveUninitialized: false
 }));
 
-// --- Initialize passport and session ---
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -53,89 +56,171 @@ db.connect(err => {
   console.log('Connected to MySQL database');
 });
 
-// JWT secret key
 const JWT_SECRET = process.env.JWT_SECRET || 'your_secret_key';
 
 // Nodemailer setup
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER,     // Your Gmail address
-    pass: process.env.EMAIL_PASS      // App password
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
   }
 });
 
-// ----------------------
-// Passport Google Strategy setup
+// Google Strategy Configuration
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     callbackURL: "/api/auth/google/callback"
   },
-  async (accessToken, refreshToken, profile, done) => {
-    // Implement findOrCreate logic here:
-    // Assumes you have a `google_id` column in your users table (VARCHAR)
+  (accessToken, refreshToken, profile, done) => {
+    db.query('SELECT * FROM users WHERE google_id = ?', [profile.id], (err, results) => {
+      if (err) return done(err);
 
-    db.query(
-      'SELECT * FROM users WHERE google_id = ?',
-      [profile.id],
-      (err, results) => {
-        if (err) return done(err);
+      if (results.length > 0) {
+        return done(null, results[0]);
+      } else {
+        db.query(
+          'INSERT INTO users (username, email, google_id, password) VALUES (?, ?, ?, NULL)',
+          [profile.displayName || '', profile.emails[0].value, profile.id],
+          (insertErr, insertResult) => {
+            if (insertErr) return done(insertErr);
 
-        if (results.length > 0) {
-          return done(null, results[0]);
-        } else {
-          // Insert new user with google_id, username from profile.displayName, and email
-          db.query(
-            'INSERT INTO users (username, email, google_id) VALUES (?, ?, ?)',
-            [profile.displayName || '', profile.emails[0].value, profile.id],
-            (insertErr, insertResult) => {
-              if (insertErr) return done(insertErr);
-
-              db.query(
-                'SELECT * FROM users WHERE id = ?',
-                [insertResult.insertId],
-                (err2, newResults) => {
-                  if (err2) return done(err2);
-                  return done(null, newResults[0]);
-                }
-              );
-            }
-          );
-        }
+            db.query('SELECT * FROM users WHERE id = ?', [insertResult.insertId], (err2, newResults) => {
+              if (err2) return done(err2);
+              return done(null, newResults[0]);
+            });
+          }
+        );
       }
-    );
+    });
   }
 ));
 
-passport.serializeUser((user, done) => {
-  done(null, user.id);
-});
-
+passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser((id, done) => {
   db.query('SELECT * FROM users WHERE id = ?', [id], (err, results) => {
-    if (err) return done(err, null);
+    if (err) return done(err);
     done(null, results[0]);
   });
 });
 
-// ----------------------
-// OAuth routes:
+// ✨ NEW: Twilio Token Generation Route
+app.post('/api/twilio/token', (req, res) => {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const apiKey = process.env.TWILIO_API_KEY;
+  const apiSecret = process.env.TWILIO_API_SECRET;
+  const chatServiceSid = process.env.TWILIO_CHAT_SERVICE_SID;
+
+  const { identity, roomName } = req.body;
+
+  // Check if Twilio credentials are configured
+  if (!accountSid || !apiKey || !apiSecret) {
+    console.error('Missing Twilio credentials');
+    return res.status(500).json({ 
+      error: 'Twilio credentials not configured',
+      details: {
+        accountSid: !!accountSid,
+        apiKey: !!apiKey,
+        apiSecret: !!apiSecret
+      }
+    });
+  }
+
+  try {
+    // Create access token
+    const token = new AccessToken(accountSid, apiKey, apiSecret, {
+      identity: identity || `user_${Date.now()}`,
+      ttl: 3600, // 1 hour
+    });
+
+    // Add video grant if roomName provided
+    if (roomName) {
+      const videoGrant = new VideoGrant({
+        room: roomName,
+      });
+      token.addGrant(videoGrant);
+      console.log(`Video grant added for room: ${roomName}`);
+    }
+
+    // Add chat grant if service configured
+    if (chatServiceSid) {
+      const chatGrant = new ChatGrant({
+        serviceSid: chatServiceSid,
+      });
+      token.addGrant(chatGrant);
+      console.log('Chat grant added');
+    }
+
+    const jwtToken = token.toJwt();
+    console.log('Twilio token generated successfully for:', identity);
+
+    res.json({
+      token: jwtToken,
+      identity: identity || `user_${Date.now()}`,
+      roomName: roomName
+    });
+  } catch (error) {
+    console.error('Error generating Twilio token:', error);
+    res.status(500).json({ 
+      error: 'Failed to generate token',
+      message: error.message 
+    });
+  }
+});
+
+// ✨ NEW: Get Twilio Configuration Status
+app.get('/api/twilio/status', (req, res) => {
+  const status = {
+    configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_API_KEY && process.env.TWILIO_API_SECRET),
+    accountSid: !!process.env.TWILIO_ACCOUNT_SID,
+    apiKey: !!process.env.TWILIO_API_KEY,
+    apiSecret: !!process.env.TWILIO_API_SECRET,
+    chatService: !!process.env.TWILIO_CHAT_SERVICE_SID
+  };
+  
+  res.json(status);
+});
+
+// Google OAuth Routes
 app.get('/api/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
+// **UPDATED:** JWT-based Google callback
 app.get('/api/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/login', session: true }),
+  passport.authenticate('google', { failureRedirect: '/login', session: false }),
   (req, res) => {
-    // Successful authentication, redirect or respond as needed
-    res.redirect('http://localhost:3000/'); // Or send token/user info JSON for SPA apps if preferred
+    // Generate JWT token
+    const token = jwt.sign(
+      { userId: req.user.id, username: req.user.username, email: req.user.email },
+      JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+
+    // Redirect to frontend with token
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${frontendUrl}/?token=${token}`);
   }
 );
 
-// ------------------ API Routes ------------------ //
+// Session check endpoint for Google OAuth
+app.get('/api/auth/check', (req, res) => {
+  if (req.isAuthenticated && req.isAuthenticated()) {
+    res.json({ 
+      authenticated: true, 
+      user: { 
+        id: req.user.id, 
+        username: req.user.username, 
+        email: req.user.email 
+      } 
+    });
+  } else {
+    res.json({ authenticated: false });
+  }
+});
 
-// 🧾 Sign Up (Registration)
+// Sign Up Route
 app.post('/api/signup', async (req, res) => {
   const { username, password, email } = req.body;
 
@@ -181,37 +266,82 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// 🔐 Login
+// ✅ UPDATED LOGIN ROUTE - Returns user data along with token
 app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
+  const { login, password } = req.body;
 
   db.query(
     'SELECT * FROM users WHERE username = ? OR email = ?',
-    [username, username], // Pass both for lookup by username or email
+    [login, login],
     async (err, results) => {
       if (err || results.length === 0) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
       const user = results[0];
+      
+      // Skip password check if user signed up with Google (password is NULL)
+      if (user.password === null) {
+        return res.status(401).json({ error: 'Please sign in with Google' });
+      }
+
       const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
-      const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '1h' });
+      const token = jwt.sign(
+        { userId: user.id, username: user.username, email: user.email }, // Include email
+        JWT_SECRET, 
+        { expiresIn: '1h' }
+      );
 
-      res.json({ message: 'Login successful', token });
+      // ✅ RETURN BOTH TOKEN AND USER DATA
+      res.json({ 
+        message: 'Login successful', 
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email
+        }
+      });
     }
   );
 });
 
-// 🚪 Logout
+// ✅ UPDATED LOGOUT ROUTE - Handles both JWT and Google OAuth sessions
 app.post('/api/logout', (req, res) => {
-  res.json({ message: 'Logout successful. Please delete the token on client side.' });
+  // Destroy session if it exists (for Google OAuth users)
+  if (req.session) {
+    req.session.destroy((err) => {
+      if (err) {
+        console.error('Session destroy error:', err);
+      }
+    });
+  }
+  
+  // Logout passport session if user is authenticated
+  if (req.isAuthenticated && req.isAuthenticated()) {
+    req.logout((err) => {
+      if (err) console.error('Passport logout error:', err);
+    });
+  }
+  
+  // Clear session cookie - handles different possible cookie names
+  res.clearCookie('connect.sid'); // Default express-session cookie name
+  res.clearCookie('session'); // Alternative session cookie name
+  
+  // Clear any other auth-related cookies
+  res.clearCookie('authToken');
+  
+  res.json({ 
+    message: 'Logout successful. Please delete the token on client side.',
+    success: true 
+  });
 });
 
-// 🔒 Protected Profile Route
+// ✅ UPDATED PROFILE ROUTE - Returns user data in correct format
 app.get('/api/profile', (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Token required' });
@@ -220,11 +350,19 @@ app.get('/api/profile', (req, res) => {
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) return res.status(403).json({ error: 'Invalid or expired token' });
 
-    res.json({ message: 'Access granted', user: decoded });
+    // ✅ RETURN USER DATA IN CORRECT FORMAT
+    res.json({ 
+      message: 'Access granted', 
+      user: {
+        id: decoded.userId,
+        username: decoded.username,
+        email: decoded.email
+      }
+    });
   });
 });
 
-// 📧 Test Email Route (Optional)
+// Test Email Route
 app.post('/api/send-email', (req, res) => {
   const { to, subject, text } = req.body;
 
@@ -244,8 +382,12 @@ app.post('/api/send-email', (req, res) => {
   });
 });
 
-// ------------------ Server Start ------------------ //
+// Start Server
 const PORT = process.env.APP_PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Available endpoints:');
+  console.log('  - POST /api/twilio/token (Generate Twilio token)');
+  console.log('  - GET /api/twilio/status (Check Twilio configuration)');
+  console.log('  - All existing endpoints...');
 });
