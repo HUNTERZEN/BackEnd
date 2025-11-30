@@ -13,7 +13,7 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const session = require('express-session');
 
-// ✨ NEW: Twilio imports
+//  NEW: Twilio imports
 const twilio = require('twilio');
 const AccessToken = twilio.jwt.AccessToken;
 const VideoGrant = AccessToken.VideoGrant;
@@ -105,7 +105,7 @@ passport.deserializeUser((id, done) => {
   });
 });
 
-// ✨ NEW: Twilio Token Generation Route
+//  NEW: Twilio Token Generation Route
 app.post('/api/twilio/token', (req, res) => {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const apiKey = process.env.TWILIO_API_KEY;
@@ -169,7 +169,7 @@ app.post('/api/twilio/token', (req, res) => {
   }
 });
 
-// ✨ NEW: Get Twilio Configuration Status
+//  NEW: Get Twilio Configuration Status
 app.get('/api/twilio/status', (req, res) => {
   const status = {
     configured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_API_KEY && process.env.TWILIO_API_SECRET),
@@ -266,7 +266,7 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// ✅ UPDATED LOGIN ROUTE - Returns user data along with token
+//  UPDATED LOGIN ROUTE - Returns user data along with token
 app.post('/api/login', (req, res) => {
   const { login, password } = req.body;
 
@@ -310,7 +310,7 @@ app.post('/api/login', (req, res) => {
   );
 });
 
-// ✅ UPDATED LOGOUT ROUTE - Handles both JWT and Google OAuth sessions
+//  UPDATED LOGOUT ROUTE - Handles both JWT and Google OAuth sessions
 app.post('/api/logout', (req, res) => {
   // Destroy session if it exists (for Google OAuth users)
   if (req.session) {
@@ -341,7 +341,7 @@ app.post('/api/logout', (req, res) => {
   });
 });
 
-// ✅ UPDATED PROFILE ROUTE - Returns user data in correct format
+//  UPDATED PROFILE ROUTE - Returns user data in correct format
 app.get('/api/profile', (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: 'Token required' });
@@ -350,7 +350,7 @@ app.get('/api/profile', (req, res) => {
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) return res.status(403).json({ error: 'Invalid or expired token' });
 
-    // ✅ RETURN USER DATA IN CORRECT FORMAT
+    //  RETURN USER DATA IN CORRECT FORMAT
     res.json({ 
       message: 'Access granted', 
       user: {
