@@ -12,6 +12,7 @@ const session = require('express-session');
 
 // Import your new MongoDB User model
 const User = require('./models/User'); 
+const partnerRoutes = require('./routes/partner');
 
 // Twilio imports
 const twilio = require('twilio');
@@ -204,6 +205,8 @@ app.get('/api/profile', (req, res) => {
     res.json({ user: { id: decoded.userId, username: decoded.username, email: decoded.email } });
   });
 });
+
+app.use('/api/partner', partnerRoutes);
 
 const PORT = process.env.APP_PORT || 8080;
 app.listen(PORT, () => {
